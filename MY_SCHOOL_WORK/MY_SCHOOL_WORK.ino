@@ -32,7 +32,7 @@
         do {
         digitalWrite (led, HIGH);
         for (int i=0; i<8; i++) {
-        tone (buzzer, melodia, 3000);
+        tone (buzzer, melodia[i], 3000);
         delay (tempo);}
         } while (digitalRead (off) == HIGH);  
     }
