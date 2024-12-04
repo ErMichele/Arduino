@@ -58,6 +58,7 @@ void setup()
   lcd_1.begin(16, 2);
   servo_9.attach(7, 500, 2500);
   pinMode (led, OUTPUT);
+  servo_9.write(0);
 }
 
 void loop()
@@ -67,9 +68,9 @@ void loop()
     print ();
     cmt = cm;
   }
-  while (digitalRead(infra) == HIGH && (inches < 40 || inches > 50)) {
+  while (inches < 40 || inches > 50) {
   	digitalWrite (led, HIGH);
-  	for (pos = 0; pos <= 180; pos += 3) {
+  	for (pos = 0; pos <= 180; pos += 10) {
   		misure (&cm, &inches);
       if (cmt!=cm) {
         print ();
@@ -79,7 +80,7 @@ void loop()
   		delay(100);
   	}
   	digitalWrite (led, LOW);
-  	for (pos = 180; pos >= 0; pos -= 3) {
+  	for (pos = 180; pos >= 0; pos -= 10) {
   		misure (&cm, &inches);
       if (cmt!=cm) {
         print ();
