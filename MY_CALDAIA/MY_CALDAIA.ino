@@ -56,7 +56,7 @@ void loop()
     digitalWrite(off, LOW);
   }
   else {
-	  digitalWrite(off, HIGH);
+    digitalWrite(off, HIGH);
     digitalWrite(on, LOW);
   }
   delay(1000);
