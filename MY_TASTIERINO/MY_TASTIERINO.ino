@@ -47,7 +47,7 @@ void loop() {
   } else if (Tasto == '0') {
     Spari = Spari * 10;
   } else if (Tasto == '*' && Spari != 0) {
-    for (int i = 1; i < Spari; i++) {
+    for (int i = 1; i <= Spari; i++) {
       Griletto.write(180);
       delay(1000);
       Griletto.write(0);
