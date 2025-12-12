@@ -3,7 +3,7 @@ const int SW_pin = 2;
 const int X_pin = 0; 
 const int Y_pin = 1; 
 #define blu 8
-#define ver 9
+#define ver 7
 #define ros 10
 #define gia 11
 #define buzzer 12
@@ -43,7 +43,7 @@ void loop() {
     digitalWrite (ros, LOW);
     digitalWrite (ver, LOW);
   }
-  else if (y>1000) {
+  else if (y>1000) { 
     digitalWrite (ver, HIGH);
     digitalWrite (gia, LOW);
     digitalWrite (blu, LOW);
@@ -51,8 +51,7 @@ void loop() {
   }
   else if (tocco==0) {
     for (int i=0; i<8; i++) {
-      
-        tone (buzzer, melodia[i], 3000);
-        delay (1000);}
+      tone (buzzer, melodia[i], 3000);
+      delay (1000);}
   }
 }
