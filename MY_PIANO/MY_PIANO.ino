@@ -1,279 +1,490 @@
-#include <SPI.h>
-#include <SD.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
+#include <SPI.h>
+#include <SD.h>
+#include "pitches.h"
 
-// --- PIN DEFINITIONS ---
-const uint8_t BUZZER_PIN    = 2;
-const uint8_t JOY_SW_PIN    = 3;
-const uint8_t SD_CS_PIN     = 4;
-const uint8_t JOY_X_PIN     = A0; // Horizontal: Mode Switching
-const uint8_t JOY_Y_PIN     = A1; // Vertical: File Scrolling
+// --- Pin Definitions ---
+const int BUZZER_PIN = 2;
+const int BUTTON_PINS[] = {3, 5, 6, 7, 8, 9, 10};
+const int NUM_BUTTONS = 7;
+const int SD_CS_PIN = 4;
+const int JOYSTICK_SW = A0;
+const int JOYSTICK_Y = A1;
+const int JOYSTICK_X = A2;
+const int LED_PIN = A3;
 
-const uint8_t NOTE_PINS[7]  = {5, 6, 7, 8, 9, 10, A2};
-const uint16_t NOTE_FREQS[7] = {262, 294, 330, 349, 392, 440, 494}; // C4, D4, E4, F4, G4, A4, B4
-const char* NOTE_NAMES[7]   = {"C4", "D4", "E4", "F4", "G4", "A4", "B4"};
+// --- Base Scale Frequencies (Octave 4) ---
+const int BASE_NOTES[NUM_BUTTONS] = {
+  NOTE_C4, NOTE_D4, NOTE_E4, NOTE_F4, NOTE_G4, NOTE_A4, NOTE_B4
+};
 
-enum Mode { INSTANT_PLAY, RECORDING, SAVED_PLAYBACK };
+const char* NOTE_NAMES[NUM_BUTTONS] = {
+  "C4", "D4", "E4", "F4", "G4", "A4", "B4"
+};
 
-// --- CLASS DEFINITIONS ---
+// --- System States ---
+enum Mode { MODE_MEMORY, MODE_PLAY, MODE_RECORD };
+Mode currentMode = MODE_PLAY;
 
-class DisplayController {
+class DisplayManager;
+class SDManager;
+
+// ==========================================
+// 1. DISPLAY MANAGER CLASS (LCD Handler)
+// ==========================================
+class DisplayManager {
 private:
   LiquidCrystal_I2C lcd;
-public:
-  DisplayController() : lcd(0x27, 16, 2) {}
 
-  void init() {
+public:
+  DisplayManager() : lcd(0x27, 16, 2) {}
+
+  void begin() {
     lcd.init();
     lcd.backlight();
     lcd.clear();
-    showText("Arduino Piano", "Initializing...");
-  }
-
-  void showText(const char* line1, const char* line2) {
-    lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.print(line1);
+    lcd.print(F("Arduino Piano"));
     lcd.setCursor(0, 1);
-    lcd.print(line2);
+    lcd.print(F("Initializing..."));
+    delay(1500);
+  }
+
+  void showPlayScreen(const char* noteName, int octave, Mode mode) {
+    lcd.setCursor(0, 0);
+    lcd.print(F("Mode: PLAY      "));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Note: "));
+    lcd.print(noteName);
+    lcd.print(F(" Oct:"));
+    lcd.print(octave);
+    lcd.print(F("  "));
+  }
+
+  void showRecordScreen(unsigned long durationMs, int noteCount) {
+    lcd.setCursor(0, 0);
+    lcd.print(F("Mode: RECORD    "));
+    lcd.setCursor(0, 1);
+    lcd.print(F("T:"));
+    lcd.print(durationMs / 1000);
+    lcd.print(F("s Notes:"));
+    lcd.print(noteCount);
+    lcd.print(F("   "));
+  }
+
+  void showMemoryScreen(const char* melodyName, int index, int total) {
+    lcd.setCursor(0, 0);
+    lcd.print(F("Mode: MEMORY    "));
+    lcd.setCursor(0, 1);
+    lcd.print(index + 1);
+    lcd.print(F("/"));
+    lcd.print(total);
+    lcd.print(F(" "));
+    lcd.print(melodyName);
+    lcd.print(F("   "));
   }
 };
 
-class Keyboard {
+// ==========================================
+// 2. SD MANAGER CLASS (File & CSV Handler)
+// ==========================================
+class SDManager {
 private:
-  const uint8_t* pins;
-  const uint16_t* freqs;
-  uint8_t count;
+  File currentFile;
 
 public:
-  Keyboard(const uint8_t* p, const uint16_t* f, uint8_t c) : pins(p), freqs(f), count(c) {}
-
-  void init() {
-    for (uint8_t i = 0; i < count; i++) {
-      pinMode(pins[i], INPUT);
+  bool begin() {
+    bool success = SD.begin(SD_CS_PIN);
+    if (success) {
+      Serial.println(F("[SD] Card initialized successfully."));
+      cleanNonMelodyFiles();
+    } else {
+      Serial.println(F("[SD] Initialization FAILED!"));
     }
+    return success;
   }
 
-  int getPressedNoteIndex() {
-    for (uint8_t i = 0; i < count; i++) {
-      if (digitalRead(pins[i]) == HIGH) {
-        return i;
-      }
-    }
-    return -1;
-  }
-
-  uint16_t getFrequency(uint8_t index) {
-    if (index < count) return freqs[index];
-    return 0;
-  }
-};
-
-class StorageManager {
-private:
-  uint8_t csPin;
-
-public:
-  StorageManager(uint8_t cs) : csPin(cs) {}
-
-  bool init() {
-    return SD.begin(csPin);
-  }
-
-  // Scans files and removes any that do not follow the naming format "melodyX.txt"
-  void cleanInvalidFiles() {
+  // Deletes any file not matching "melody_{number}.csv"
+  void cleanNonMelodyFiles() {
+    Serial.println(F("[SD] Cleaning non-melody files..."));
     File root = SD.open("/");
     while (true) {
       File entry = root.openNextFile();
       if (!entry) break;
-
-      String name = entry.name();
-      entry.close();
-
-      name.toLowerCase();
       if (!entry.isDirectory()) {
-        if (!name.startsWith("melody") || !name.endsWith(".txt")) {
-          SD.remove((char*)name.c_str());
+        char filename[13];
+        strcpy(filename, entry.name());
+        String name = String(filename);
+        name.toLowerCase();
+        entry.close(); // Close before removing
+
+        bool isMelody = false;
+        if (name.startsWith("melody_") && name.endsWith(".csv")) {
+          int startIdx = 7;
+          int endIdx = name.lastIndexOf('.');
+          if (endIdx > startIdx) {
+            String numStr = name.substring(startIdx, endIdx);
+            bool isNumeric = true;
+            for (unsigned int i = 0; i < numStr.length(); i++) {
+              if (!isDigit(numStr[i])) { isNumeric = false; break; }
+            }
+            if (isNumeric && numStr.length() > 0) isMelody = true;
+          }
         }
+
+        if (!isMelody) {
+          SD.remove(filename);
+          Serial.print(F("[SD] Removed unauthorized file: "));
+          Serial.println(filename);
+        }
+      } else {
+        entry.close();
       }
     }
     root.close();
+    Serial.println(F("[SD] Cleanup complete."));
   }
 
-  uint8_t getNextMelodyNumber() {
-    uint8_t index = 1;
+  // Find the next incremental melody filename (e.g., melody_1.csv, melody_2.csv)
+  void getNextMelodyFilename(char* buffer, size_t maxLen) {
+    int maxNum = 0;
+    File root = SD.open("/");
     while (true) {
-      String fileName = "melody" + String(index) + ".txt";
-      if (!SD.exists(fileName)) {
-        return index;
-      }
-      index++;
-    }
-  }
-
-  void saveNote(const String& filename, uint16_t freq, unsigned long duration) {
-    File file = SD.open(filename, FILE_WRITE);
-    if (file) {
-      file.print(freq);
-      file.print(",");
-      file.println(duration);
-      file.close();
-    }
-  }
-
-  void playMelody(const String& filename, uint8_t buzzerPin) {
-    File file = SD.open(filename, FILE_READ);
-    if (!file) return;
-
-    while (file.available()) {
-      String line = file.readStringUntil('\n');
-      line.trim();
-      if (line.length() == 0) continue;
-
-      int commaIndex = line.indexOf(',');
-      if (commaIndex != -1) {
-        uint16_t freq = line.substring(0, commaIndex).toInt();
-        unsigned long duration = line.substring(commaIndex + 1).toInt();
-
-        if (freq > 0) {
-          tone(buzzerPin, freq);
-          delay(duration);
-          noTone(buzzerPin);
-        } else {
-          delay(duration);
+      File entry = root.openNextFile();
+      if (!entry) break;
+      if (!entry.isDirectory()) {
+        String name = String(entry.name());
+        name.toLowerCase();
+        if (name.startsWith("melody_") && name.endsWith(".csv")) {
+          int startIdx = 7;
+          int endIdx = name.lastIndexOf('.');
+          if (endIdx > startIdx) {
+            int num = name.substring(startIdx, endIdx).toInt();
+            if (num > maxNum) maxNum = num;
+          }
         }
-        delay(50); // Small pause between notes
       }
+      entry.close();
     }
-    file.close();
+    root.close();
+
+    snprintf(buffer, maxLen, "melody_%d.csv", maxNum + 1);
+    Serial.print(F("[SD] Next melody filename generated: "));
+    Serial.println(buffer);
+  }
+
+  bool saveMelody(const char* filename, uint16_t* notes, uint16_t* durations, int count) {
+    if (SD.exists(filename)) {
+      SD.remove(filename);
+    }
+    currentFile = SD.open(filename, FILE_WRITE);
+    if (!currentFile) {
+      Serial.println(F("[SD] Error opening file for writing!"));
+      return false;
+    }
+
+    for (int i = 0; i < count; i++) {
+      currentFile.print(notes[i]);
+      currentFile.print(',');
+      currentFile.println(durations[i]);
+    }
+    currentFile.close();
+    Serial.print(F("[SD] Successfully saved melody to: "));
+    Serial.println(filename);
+    return true;
+  }
+
+  int getMelodyCount() {
+    File root = SD.open("/");
+    int count = 0;
+    while (true) {
+      File entry = root.openNextFile();
+      if (!entry) break;
+      if (!entry.isDirectory()) {
+        String name = String(entry.name());
+        if (name.endsWith(".CSV") || name.endsWith(".csv")) {
+          count++;
+        }
+      }
+      entry.close();
+    }
+    root.close();
+    return count;
+  }
+
+  void getMelodyFilename(int index, char* buffer, size_t maxLen) {
+    File root = SD.open("/");
+    int count = 0;
+    buffer[0] = '\0';
+    while (true) {
+      File entry = root.openNextFile();
+      if (!entry) break;
+      if (!entry.isDirectory()) {
+        String name = String(entry.name());
+        if (name.endsWith(".CSV") || name.endsWith(".csv")) {
+          if (count == index) {
+            name.toCharArray(buffer, maxLen);
+            entry.close();
+            break;
+          }
+          count++;
+        }
+      }
+      entry.close();
+    }
+    root.close();
   }
 };
 
-// --- GLOBAL SYSTEM OBJECTS ---
-DisplayController display;
-Keyboard keyboard(NOTE_PINS, NOTE_FREQS, 7);
-StorageManager storage(SD_CS_PIN);
+DisplayManager displayMgr;
+SDManager sdMgr;
 
-Mode currentMode = INSTANT_PLAY;
-uint8_t selectedMelodyIndex = 1;
-bool isRecording = false;
-String currentRecFile = "";
-unsigned long noteStartTime = 0;
-int lastNotePressed = -1;
+// ==========================================
+// 3. PIANO SYNTH / RECORDER CLASS
+// ==========================================
+class PianoSynth {
+private:
+  int octaveShift;
+  uint16_t recordedNotes[50];
+  uint16_t recordedDurations[50];
+  int recordCount;
+  unsigned long recordStartTime;
+  unsigned long lastNoteTime;
+  bool isRecording;
 
-void setup() {
-  pinMode(JOY_SW_PIN, INPUT_PULLUP);
-  pinMode(BUZZER_PIN, OUTPUT);
-
-  display.init();
-  keyboard.init();
-
-  if (!storage.init()) {
-    display.showText("SD Card Error!", "Check Connections");
-    while (true); // Halt execution if SD card fails
+public:
+  PianoSynth() {
+    octaveShift = 0;
+    recordCount = 0;
+    isRecording = false;
   }
 
-  storage.cleanInvalidFiles();
-  delay(1000);
-  display.showText("Mode: Instant", "Play Notes");
+  void setOctave(int shift) {
+    octaveShift = constrain(shift, -2, 2);
+    Serial.print(F("[Piano] Octave shifted to: "));
+    Serial.println(4 + octaveShift);
+  }
+
+  int getOctave() {
+    return 4 + octaveShift;
+  }
+
+  void playNote(int buttonIndex, DisplayManager &disp) {
+    int baseFreq = BASE_NOTES[buttonIndex];
+    int freq = baseFreq;
+
+    if (octaveShift > 0) {
+      freq = baseFreq * (1 << octaveShift);
+    } else if (octaveShift < 0) {
+      freq = baseFreq >> (-octaveShift);
+    }
+
+    tone(BUZZER_PIN, freq);
+    
+    // LED Control & Debug
+    digitalWrite(LED_PIN, HIGH);
+    Serial.println(F("[LED] ON (Playing/Recording)"));
+
+    disp.showPlayScreen(NOTE_NAMES[buttonIndex], 4 + octaveShift, currentMode);
+
+    if (isRecording && recordCount < 50) {
+      unsigned long now = millis();
+      if (recordCount > 0) {
+        recordedDurations[recordCount - 1] = (uint16_t)(now - lastNoteTime);
+      }
+      recordedNotes[recordCount] = (uint16_t)freq;
+      lastNoteTime = now;
+      recordCount++;
+      Serial.print(F("[Record] Note added: "));
+      Serial.print(freq);
+      Serial.print(F(" Hz, Count: "));
+      Serial.println(recordCount);
+    }
+  }
+
+  void stopNote() {
+    noTone(BUZZER_PIN);
+    digitalWrite(LED_PIN, LOW);
+  }
+
+  void startRecording() {
+    recordCount = 0;
+    recordStartTime = millis();
+    lastNoteTime = recordStartTime;
+    isRecording = true;
+    Serial.println(F("[Record] Started recording session."));
+  }
+
+  void stopRecording() {
+    isRecording = false;
+    if (recordCount > 0) {
+      recordedDurations[recordCount - 1] = 250; 
+    }
+    char filename[15];
+    sdMgr.getNextMelodyFilename(filename, sizeof(filename));
+    sdMgr.saveMelody(filename, recordedNotes, recordedDurations, recordCount);
+    Serial.println(F("[Record] Stopped and saved recording."));
+  }
+
+  bool getIsRecording() { return isRecording; }
+  int getRecordCount() { return recordCount; }
+  unsigned long getRecordDuration() { return millis() - recordStartTime; }
+
+  void playMelodyFromFile(const char* filename) {
+    Serial.print(F("[Player] Playing melody from file: "));
+    Serial.println(filename);
+
+    File f = SD.open(filename);
+    if (!f) {
+      Serial.println(F("[Player] Failed to open file!"));
+      return;
+    }
+
+    while (f.available()) {
+      String line = f.readStringUntil('\n');
+      int commaIndex = line.indexOf(',');
+      if (commaIndex > 0) {
+        int freq = line.substring(0, commaIndex).toInt();
+        int duration = line.substring(commaIndex + 1).toInt();
+        tone(BUZZER_PIN, freq, duration);
+        digitalWrite(LED_PIN, HIGH);
+        delay(duration + 30);
+        digitalWrite(LED_PIN, LOW);
+      }
+    }
+    f.close();
+    Serial.println(F("[Player] Finished playing melody."));
+  }
+};
+
+PianoSynth piano;
+
+// ==========================================
+// SETUP AND MAIN LOOP
+// ==========================================
+void setup() {
+  Serial.begin(9600);
+  while (!Serial); // Wait for serial monitor to open (optional)
+  Serial.println(F("--- Arduino Piano Booting ---"));
+
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(JOYSTICK_SW, INPUT_PULLUP);
+
+  for (int i = 0; i < NUM_BUTTONS; i++) {
+    pinMode(BUTTON_PINS[i], INPUT_PULLUP);
+  }
+
+  displayMgr.begin();
+  sdMgr.begin();
+  
+  Serial.println(F("--- Setup Complete ---"));
 }
 
 void loop() {
-  int xVal = analogRead(JOY_X_PIN);
-  int yVal = analogRead(JOY_Y_PIN);
-  static unsigned long lastNavTime = 0;
+  int xVal = analogRead(JOYSTICK_X);
+  int yVal = analogRead(JOYSTICK_Y);
+  bool swPressed = (digitalRead(JOYSTICK_SW) == LOW);
 
-  // Debounce filter for joystick navigation
-  if (millis() - lastNavTime > 300) {
-    
-    // --- HORIZONTAL (X-AXIS): SWITCH MODES ---
-    if (xVal < 300) { // Left -> Instant Play Mode
-      currentMode = INSTANT_PLAY;
-      display.showText("Mode: Instant", "Play Notes");
-      lastNavTime = millis();
+  // --- Circular Mode Switching via X-axis ---
+  static unsigned long lastModeChange = 0;
+  if (millis() - lastModeChange > 400) {
+    if (xVal > 800) { // Joystick Right
+      if (currentMode == MODE_PLAY) currentMode = MODE_RECORD;
+      else if (currentMode == MODE_RECORD) currentMode = MODE_MEMORY;
+      else if (currentMode == MODE_MEMORY) currentMode = MODE_PLAY;
+      
+      Serial.print(F("[Mode] Switched Right -> Current Mode: "));
+      Serial.println(currentMode);
+      lastModeChange = millis();
     } 
-    else if (xVal > 700) { // Right -> Saved Melody Mode
-      currentMode = SAVED_PLAYBACK;
-      String fileToDisplay = "melody" + String(selectedMelodyIndex) + ".txt";
-      display.showText("Mode: Saved", fileToDisplay.c_str());
-      lastNavTime = millis();
-    }
-
-    // --- VERTICAL (Y-AXIS): CHANGE FILES (Only in Saved Playback Mode) ---
-    if (currentMode == SAVED_PLAYBACK) {
-      if (yVal < 300) { // Up -> Previous File
-        if (selectedMelodyIndex > 1) {
-          selectedMelodyIndex--;
-          String fileToDisplay = "melody" + String(selectedMelodyIndex) + ".txt";
-          display.showText("Mode: Saved", fileToDisplay.c_str());
-          lastNavTime = millis();
-        }
-      } 
-      else if (yVal > 700) { // Down -> Next File (if it exists)
-        String nextFile = "melody" + String(selectedMelodyIndex + 1) + ".txt";
-        if (SD.exists(nextFile)) {
-          selectedMelodyIndex++;
-          display.showText("Mode: Saved", nextFile.c_str());
-          lastNavTime = millis();
-        }
-      }
+    else if (xVal < 200) { // Joystick Left
+      if (currentMode == MODE_PLAY) currentMode = MODE_MEMORY;
+      else if (currentMode == MODE_MEMORY) currentMode = MODE_RECORD;
+      else if (currentMode == MODE_RECORD) currentMode = MODE_PLAY;
+      
+      Serial.print(F("[Mode] Switched Left -> Current Mode: "));
+      Serial.println(currentMode);
+      lastModeChange = millis();
     }
   }
 
-  // --- JOYSTICK SWITCH CLICK ---
-  static bool lastSwState = HIGH;
-  bool swState = digitalRead(JOY_SW_PIN);
-  if (lastSwState == HIGH && swState == LOW) { // Button Press Event
-    delay(50); // Debounce
-    if (currentMode == INSTANT_PLAY) {
-      // Toggle Recording Mode
-      if (!isRecording) {
-        isRecording = true;
-        uint8_t newNum = storage.getNextMelodyNumber();
-        currentRecFile = "melody" + String(newNum) + ".txt";
-        display.showText("REC Started...", currentRecFile.c_str());
-      } else {
-        isRecording = false;
-        display.showText("REC Saved!", currentRecFile.c_str());
-        delay(1000);
-        display.showText("Mode: Instant", "Play Notes");
-      }
-    } else if (currentMode == SAVED_PLAYBACK) {
-      String fileToPlay = "melody" + String(selectedMelodyIndex) + ".txt";
-      if (SD.exists(fileToPlay)) {
-        display.showText("Playing...", fileToPlay.c_str());
-        storage.playMelody(fileToPlay, BUZZER_PIN);
-        display.showText("Mode: Saved", fileToPlay.c_str());
-      } else {
-        display.showText("File Not Found", fileToPlay.c_str());
+  // --- Mode Handling ---
+  if (currentMode == MODE_PLAY) {
+    if (yVal > 800) {
+      piano.setOctave(1);
+    } else if (yVal < 200) {
+      piano.setOctave(-1);
+    }
+
+    bool buttonPressed = false;
+    for (int i = 0; i < NUM_BUTTONS; i++) {
+      if (digitalRead(BUTTON_PINS[i]) == LOW) {
+        piano.playNote(i, displayMgr);
+        buttonPressed = true;
+        break;
       }
     }
-  }
-  lastSwState = swState;
-
-  // --- NOTE PLAYING LOGIC (Instant Mode) ---
-  if (currentMode == INSTANT_PLAY) {
-    int noteIndex = keyboard.getPressedNoteIndex();
-
-    if (noteIndex != -1) {
-      if (lastNotePressed == -1) {
-        // New note pressed
-        lastNotePressed = noteIndex;
-        noteStartTime = millis();
-        tone(BUZZER_PIN, keyboard.getFrequency(noteIndex));
+    if (!buttonPressed) {
+      piano.stopNote();
+      displayMgr.showPlayScreen("---", piano.getOctave(), currentMode);
+    }
+  } 
+  else if (currentMode == MODE_RECORD) {
+    static bool lastSwState = HIGH;
+    if (swPressed && lastSwState == HIGH) {
+      if (!piano.getIsRecording()) {
+        piano.startRecording();
+      } else {
+        piano.stopRecording(); 
       }
+      delay(300);
+    }
+    lastSwState = swPressed;
+
+    bool buttonPressed = false;
+    for (int i = 0; i < NUM_BUTTONS; i++) {
+      if (digitalRead(BUTTON_PINS[i]) == LOW) {
+        piano.playNote(i, displayMgr);
+        buttonPressed = true;
+        break;
+      }
+    }
+    if (!buttonPressed) {
+      piano.stopNote();
+    }
+
+    if (piano.getIsRecording()) {
+      displayMgr.showRecordScreen(piano.getRecordDuration(), piano.getRecordCount());
     } else {
-      if (lastNotePressed != -1) {
-        // Note released
-        noTone(BUZZER_PIN);
-        unsigned long duration = millis() - noteStartTime;
+      displayMgr.showRecordScreen(0, 0);
+    }
+  } 
+  else if (currentMode == MODE_MEMORY) {
+    int totalSongs = sdMgr.getMelodyCount();
+    static int selectedSongIndex = 0;
 
-        if (isRecording && duration > 20) {
-          storage.saveNote(currentRecFile, keyboard.getFrequency(lastNotePressed), duration);
-        }
-        lastNotePressed = -1;
-      }
+    if (yVal > 800 && totalSongs > 0) {
+      selectedSongIndex = (selectedSongIndex + 1) % totalSongs;
+      delay(300);
+    } else if (yVal < 200 && totalSongs > 0) {
+      selectedSongIndex = (selectedSongIndex - 1 + totalSongs) % totalSongs;
+      delay(300);
+    }
+
+    char filename[13];
+    if (totalSongs > 0) {
+      sdMgr.getMelodyFilename(selectedSongIndex, filename, sizeof(filename));
+    } else {
+      strcpy(filename, "No Files");
+    }
+    
+    displayMgr.showMemoryScreen(filename, selectedSongIndex, totalSongs);
+
+    if (swPressed && totalSongs > 0) {
+      piano.playMelodyFromFile(filename);
+      delay(300);
     }
   }
 }
