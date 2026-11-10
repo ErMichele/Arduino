@@ -1,3 +1,45 @@
+/* ==========================================================
+ * WIRING CONNECTIONS (Arduino Uno / Nano Pinout):
+ * ==========================================================
+ * 1. BUZZER:
+ *    - Positive (Anode / Signal) -> Digital Pin 2 (BUZZER_PIN)
+ *    - Negative (Cathode / GND)  -> GND (recommended with 100Ω resistor)
+ *
+ * 2. PUSH BUTTONS (7 Piano Keys, using internal pullups):
+ *    - Button 1 (Note C4) -> Digital Pin 3 & GND
+ *    - Button 2 (Note D4) -> Digital Pin 5 & GND
+ *    - Button 3 (Note E4) -> Digital Pin 6 & GND
+ *    - Button 4 (Note F4) -> Digital Pin 7 & GND
+ *    - Button 5 (Note G4) -> Digital Pin 8 & GND
+ *    - Button 6 (Note A4) -> Digital Pin 9 & GND
+ *    - Button 7 (Note B4) -> Digital Pin 10 & GND
+ *
+ * 3. SD CARD MODULE (SPI Interface):
+ *    - CS   -> Digital Pin 4 (SD_CS_PIN)
+ *    - MOSI -> Digital Pin 11 (MOSI)
+ *    - MISO -> Digital Pin 12 (MISO)
+ *    - SCK  -> Digital Pin 13 (SCK)
+ *    - VCC  -> 5V (or 3.3V depending on module specs)
+ *    - GND  -> GND
+ *
+ * 4. JOYSTICK MODULE:
+ *    - SW (Button) -> Analog Pin A0 (JOYSTICK_SW) [Input Pullup]
+ *    - VRy (Y-axis)-> Analog Pin A1 (JOYSTICK_Y)  [Octave Shift / Song Select]
+ *    - VRx (X-axis)-> Analog Pin A2 (JOYSTICK_X)  [Mode Switching]
+ *    - VCC         -> 5V
+ *    - GND         -> GND
+ *
+ * 5. LED INDICATOR:
+ *    - Anode (+)   -> Analog Pin A3 (LED_PIN) through 220Ω resistor
+ *    - Cathode (-) -> GND
+ *
+ * 6. I2C LCD DISPLAY (16x2 with I2C Backpack):
+ *    - SDA -> Analog Pin A4 (SDA)
+ *    - SCL -> Analog Pin A5 (SCL)
+ *    - VCC -> 5V
+ *    - GND -> GND
+ * ========================================================== */
+
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <SPI.h>
@@ -36,6 +78,8 @@ class SDManager;
 class DisplayManager {
 private:
   LiquidCrystal_I2C lcd;
+  String lastLine1 = "";
+  String lastLine2 = "";
 
 public:
   DisplayManager() : lcd(0x27, 16, 2) {}
@@ -53,7 +97,7 @@ public:
 
   void showPlayScreen(const char* noteName, int octave, Mode mode) {
     lcd.setCursor(0, 0);
-    lcd.print(F("Mode: PLAY      "));
+    lcd.print(F("Mode: PLAY       "));
     lcd.setCursor(0, 1);
     lcd.print(F("Note: "));
     lcd.print(noteName);
@@ -64,7 +108,7 @@ public:
 
   void showRecordScreen(unsigned long durationMs, int noteCount) {
     lcd.setCursor(0, 0);
-    lcd.print(F("Mode: RECORD    "));
+    lcd.print(F("Mode: RECORD     "));
     lcd.setCursor(0, 1);
     lcd.print(F("T:"));
     lcd.print(durationMs / 1000);
@@ -75,7 +119,7 @@ public:
 
   void showMemoryScreen(const char* melodyName, int index, int total) {
     lcd.setCursor(0, 0);
-    lcd.print(F("Mode: MEMORY    "));
+    lcd.print(F("Mode: MEMORY     "));
     lcd.setCursor(0, 1);
     lcd.print(index + 1);
     lcd.print(F("/"));
@@ -105,7 +149,6 @@ public:
     return success;
   }
 
-  // Deletes any file not matching "melody_{number}.csv"
   void cleanNonMelodyFiles() {
     Serial.println(F("[SD] Cleaning non-melody files..."));
     File root = SD.open("/");
@@ -117,7 +160,7 @@ public:
         strcpy(filename, entry.name());
         String name = String(filename);
         name.toLowerCase();
-        entry.close(); // Close before removing
+        entry.close();
 
         bool isMelody = false;
         if (name.startsWith("melody_") && name.endsWith(".csv")) {
@@ -146,7 +189,6 @@ public:
     Serial.println(F("[SD] Cleanup complete."));
   }
 
-  // Find the next incremental melody filename (e.g., melody_1.csv, melody_2.csv)
   void getNextMelodyFilename(char* buffer, size_t maxLen) {
     int maxNum = 0;
     File root = SD.open("/");
@@ -260,8 +302,8 @@ public:
     isRecording = false;
   }
 
-  void setOctave(int shift) {
-    octaveShift = constrain(shift, -2, 2);
+  void changeOctave(int delta) {
+    octaveShift = constrain(octaveShift + delta, -2, 2);
     Serial.print(F("[Piano] Octave shifted to: "));
     Serial.println(4 + octaveShift);
   }
@@ -272,19 +314,18 @@ public:
 
   void playNote(int buttonIndex, DisplayManager &disp) {
     int baseFreq = BASE_NOTES[buttonIndex];
-    int freq = baseFreq;
+    long freq = baseFreq;
 
     if (octaveShift > 0) {
-      freq = baseFreq * (1 << octaveShift);
+      freq = baseFreq * (1L << octaveShift);
     } else if (octaveShift < 0) {
       freq = baseFreq >> (-octaveShift);
     }
 
-    tone(BUZZER_PIN, freq);
+    tone(BUZZER_PIN, (int)freq);
     
     // LED Control & Debug
     digitalWrite(LED_PIN, HIGH);
-    Serial.println(F("[LED] ON (Playing/Recording)"));
 
     disp.showPlayScreen(NOTE_NAMES[buttonIndex], 4 + octaveShift, currentMode);
 
@@ -365,7 +406,7 @@ PianoSynth piano;
 // ==========================================
 void setup() {
   Serial.begin(9600);
-  while (!Serial); // Wait for serial monitor to open (optional)
+  while (!Serial); 
   Serial.println(F("--- Arduino Piano Booting ---"));
 
   pinMode(BUZZER_PIN, OUTPUT);
@@ -412,10 +453,15 @@ void loop() {
 
   // --- Mode Handling ---
   if (currentMode == MODE_PLAY) {
-    if (yVal > 800) {
-      piano.setOctave(1);
-    } else if (yVal < 200) {
-      piano.setOctave(-1);
+    static unsigned long lastOctaveChange = 0;
+    if (millis() - lastOctaveChange > 400) {
+      if (yVal > 800) {
+        piano.changeOctave(1);
+        lastOctaveChange = millis();
+      } else if (yVal < 200) {
+        piano.changeOctave(-1);
+        lastOctaveChange = millis();
+      }
     }
 
     bool buttonPressed = false;
