@@ -29,11 +29,7 @@
  *    - VCC         -> 5V
  *    - GND         -> GND
  *
- * 5. LED INDICATOR:
- *    - Anode (+)   -> Analog Pin A3 (LED_PIN) through 220Ω resistor
- *    - Cathode (-) -> GND
- *
- * 6. I2C LCD DISPLAY (16x2 with I2C Backpack):
+ * 5. I2C LCD DISPLAY (16x2 with I2C Backpack):
  *    - SDA -> Analog Pin A4 (SDA)
  *    - SCL -> Analog Pin A5 (SCL)
  *    - VCC -> 5V
@@ -44,6 +40,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <SPI.h>
 #include <SD.h>
+#include <EEPROM.h>
 #include "pitches.h"
 
 // --- Pin Definitions ---
@@ -54,7 +51,10 @@ const int SD_CS_PIN = 4;
 const int JOYSTICK_SW = A0;
 const int JOYSTICK_Y = A1;
 const int JOYSTICK_X = A2;
-const int LED_PIN = A3;
+
+// --- EEPROM Memory Addresses ---
+const int EEPROM_ADDR_MODE = 0;
+const int EEPROM_ADDR_SONG = 1;
 
 // --- Base Scale Frequencies (Octave 4) ---
 const int BASE_NOTES[NUM_BUTTONS] = {
@@ -78,13 +78,12 @@ class SDManager;
 class DisplayManager {
 private:
   LiquidCrystal_I2C lcd;
-  String lastLine1 = "";
-  String lastLine2 = "";
 
 public:
   DisplayManager() : lcd(0x27, 16, 2) {}
 
   void begin() {
+    Serial.println(F("[Display] Initializing LCD display..."));
     lcd.init();
     lcd.backlight();
     lcd.clear();
@@ -93,6 +92,7 @@ public:
     lcd.setCursor(0, 1);
     lcd.print(F("Initializing..."));
     delay(1500);
+    Serial.println(F("[Display] LCD initialized successfully."));
   }
 
   void showPlayScreen(const char* noteName, int octave, Mode mode) {
@@ -139,19 +139,21 @@ private:
 
 public:
   bool begin() {
+    Serial.println(F("[SD] Initializing SD Card SPI interface..."));
     bool success = SD.begin(SD_CS_PIN);
     if (success) {
       Serial.println(F("[SD] Card initialized successfully."));
       cleanNonMelodyFiles();
     } else {
-      Serial.println(F("[SD] Initialization FAILED!"));
+      Serial.println(F("[SD] ERROR: Initialization FAILED! Check wiring and format."));
     }
     return success;
   }
 
   void cleanNonMelodyFiles() {
-    Serial.println(F("[SD] Cleaning non-melody files..."));
+    Serial.println(F("[SD] Scanning root directory to clean non-melody files..."));
     File root = SD.open("/");
+    int cleanedCount = 0;
     while (true) {
       File entry = root.openNextFile();
       if (!entry) break;
@@ -178,6 +180,7 @@ public:
 
         if (!isMelody) {
           SD.remove(filename);
+          cleanedCount++;
           Serial.print(F("[SD] Removed unauthorized file: "));
           Serial.println(filename);
         }
@@ -186,7 +189,8 @@ public:
       }
     }
     root.close();
-    Serial.println(F("[SD] Cleanup complete."));
+    Serial.print(F("[SD] Cleanup complete. Removed files count: "));
+    Serial.println(cleanedCount);
   }
 
   void getNextMelodyFilename(char* buffer, size_t maxLen) {
@@ -217,12 +221,17 @@ public:
   }
 
   bool saveMelody(const char* filename, uint16_t* notes, uint16_t* durations, int count) {
+    Serial.print(F("[SD] Saving melody file: "));
+    Serial.println(filename);
+    
     if (SD.exists(filename)) {
+      Serial.println(F("[SD] File already exists, overwriting..."));
       SD.remove(filename);
     }
+    
     currentFile = SD.open(filename, FILE_WRITE);
     if (!currentFile) {
-      Serial.println(F("[SD] Error opening file for writing!"));
+      Serial.println(F("[SD] ERROR: Failed to open file for writing!"));
       return false;
     }
 
@@ -232,8 +241,9 @@ public:
       currentFile.println(durations[i]);
     }
     currentFile.close();
-    Serial.print(F("[SD] Successfully saved melody to: "));
-    Serial.println(filename);
+    Serial.print(F("[SD] Successfully saved "));
+    Serial.print(count);
+    Serial.println(F(" notes to SD card."));
     return true;
   }
 
@@ -303,8 +313,11 @@ public:
   }
 
   void changeOctave(int delta) {
+    int oldOctave = 4 + octaveShift;
     octaveShift = constrain(octaveShift + delta, -2, 2);
-    Serial.print(F("[Piano] Octave shifted to: "));
+    Serial.print(F("[Piano Synth] Octave shifted from "));
+    Serial.print(oldOctave);
+    Serial.print(F(" to: "));
     Serial.println(4 + octaveShift);
   }
 
@@ -322,11 +335,16 @@ public:
       freq = baseFreq >> (-octaveShift);
     }
 
-    tone(BUZZER_PIN, (int)freq);
-    
-    // LED Control & Debug
-    digitalWrite(LED_PIN, HIGH);
+    Serial.print(F("[Piano Synth] Playing Note -> Index: "));
+    Serial.print(buttonIndex);
+    Serial.print(F(", Name: "));
+    Serial.print(NOTE_NAMES[buttonIndex]);
+    Serial.print(F(", Freq: "));
+    Serial.print(freq);
+    Serial.print(F(" Hz, Octave: "));
+    Serial.println(4 + octaveShift);
 
+    tone(BUZZER_PIN, (int)freq);
     disp.showPlayScreen(NOTE_NAMES[buttonIndex], 4 + octaveShift, currentMode);
 
     if (isRecording && recordCount < 50) {
@@ -337,16 +355,17 @@ public:
       recordedNotes[recordCount] = (uint16_t)freq;
       lastNoteTime = now;
       recordCount++;
-      Serial.print(F("[Record] Note added: "));
+      Serial.print(F("[Record Buffer] Note added to memory. Freq: "));
       Serial.print(freq);
-      Serial.print(F(" Hz, Count: "));
+      Serial.print(F(" Hz | Total Recorded Notes: "));
       Serial.println(recordCount);
+    } else if (isRecording && recordCount >= 50) {
+      Serial.println(F("[Record Buffer] WARNING: Recording buffer full (max 50 notes)!"));
     }
   }
 
   void stopNote() {
     noTone(BUZZER_PIN);
-    digitalWrite(LED_PIN, LOW);
   }
 
   void startRecording() {
@@ -354,18 +373,18 @@ public:
     recordStartTime = millis();
     lastNoteTime = recordStartTime;
     isRecording = true;
-    Serial.println(F("[Record] Started recording session."));
+    Serial.println(F("[Record Session] STARTED new recording session. Timers reset."));
   }
 
   void stopRecording() {
     isRecording = false;
+    Serial.println(F("[Record Session] STOPPED recording session."));
     if (recordCount > 0) {
       recordedDurations[recordCount - 1] = 250; 
     }
     char filename[15];
     sdMgr.getNextMelodyFilename(filename, sizeof(filename));
     sdMgr.saveMelody(filename, recordedNotes, recordedDurations, recordCount);
-    Serial.println(F("[Record] Stopped and saved recording."));
   }
 
   bool getIsRecording() { return isRecording; }
@@ -373,29 +392,37 @@ public:
   unsigned long getRecordDuration() { return millis() - recordStartTime; }
 
   void playMelodyFromFile(const char* filename) {
-    Serial.print(F("[Player] Playing melody from file: "));
+    Serial.print(F("[Playback Engine] Starting melody playback from file: "));
     Serial.println(filename);
 
     File f = SD.open(filename);
     if (!f) {
-      Serial.println(F("[Player] Failed to open file!"));
+      Serial.println(F("[Playback Engine] ERROR: Failed to open melody file for reading!"));
       return;
     }
 
+    int noteIndex = 0;
     while (f.available()) {
       String line = f.readStringUntil('\n');
       int commaIndex = line.indexOf(',');
       if (commaIndex > 0) {
         int freq = line.substring(0, commaIndex).toInt();
         int duration = line.substring(commaIndex + 1).toInt();
+        
+        Serial.print(F("[Playback Engine] Note #"));
+        Serial.print(noteIndex++);
+        Serial.print(F(" -> Freq: "));
+        Serial.print(freq);
+        Serial.print(F(" Hz, Duration: "));
+        Serial.print(duration);
+        Serial.println(F(" ms"));
+
         tone(BUZZER_PIN, freq, duration);
-        digitalWrite(LED_PIN, HIGH);
         delay(duration + 30);
-        digitalWrite(LED_PIN, LOW);
       }
     }
     f.close();
-    Serial.println(F("[Player] Finished playing melody."));
+    Serial.println(F("[Playback Engine] Finished playing melody successfully."));
   }
 };
 
@@ -407,20 +434,41 @@ PianoSynth piano;
 void setup() {
   Serial.begin(9600);
   while (!Serial); 
-  Serial.println(F("--- Arduino Piano Booting ---"));
+  Serial.println(F("=========================================="));
+  Serial.println(F("--- Arduino Piano Boot Sequence Started ---"));
+  Serial.println(F("=========================================="));
 
   pinMode(BUZZER_PIN, OUTPUT);
-  pinMode(LED_PIN, OUTPUT);
   pinMode(JOYSTICK_SW, INPUT_PULLUP);
+  Serial.println(F("[Setup] Buzzer pin configured as OUTPUT."));
+  Serial.println(F("[Setup] Joystick switch configured as INPUT_PULLUP."));
 
   for (int i = 0; i < NUM_BUTTONS; i++) {
     pinMode(BUTTON_PINS[i], INPUT_PULLUP);
+    Serial.print(F("[Setup] Piano Button pin configured: "));
+    Serial.println(BUTTON_PINS[i]);
   }
 
   displayMgr.begin();
   sdMgr.begin();
+
+  // --- Restore Mode from EEPROM ---
+  byte storedMode = EEPROM.read(EEPROM_ADDR_MODE);
+  if (storedMode == MODE_PLAY || storedMode == MODE_RECORD || storedMode == MODE_MEMORY) {
+    currentMode = (Mode)storedMode;
+    Serial.print(F("[EEPROM] Restored saved mode: "));
+    if (currentMode == MODE_PLAY) Serial.println(F("MODE_PLAY"));
+    else if (currentMode == MODE_RECORD) Serial.println(F("MODE_RECORD"));
+    else if (currentMode == MODE_MEMORY) Serial.println(F("MODE_MEMORY"));
+  } else {
+    currentMode = MODE_PLAY;
+    EEPROM.update(EEPROM_ADDR_MODE, currentMode);
+    Serial.println(F("[EEPROM] No valid mode found in EEPROM. Defaulted to MODE_PLAY."));
+  }
   
-  Serial.println(F("--- Setup Complete ---"));
+  Serial.println(F("=========================================="));
+  Serial.println(F("--- Setup Complete. Entering Main Loop ---"));
+  Serial.println(F("=========================================="));
 }
 
 void loop() {
@@ -432,21 +480,39 @@ void loop() {
   static unsigned long lastModeChange = 0;
   if (millis() - lastModeChange > 400) {
     if (xVal > 800) { // Joystick Right
+      Mode oldMode = currentMode;
       if (currentMode == MODE_PLAY) currentMode = MODE_RECORD;
       else if (currentMode == MODE_RECORD) currentMode = MODE_MEMORY;
       else if (currentMode == MODE_MEMORY) currentMode = MODE_PLAY;
       
-      Serial.print(F("[Mode] Switched Right -> Current Mode: "));
-      Serial.println(currentMode);
+      // Save new mode to EEPROM
+      EEPROM.update(EEPROM_ADDR_MODE, (byte)currentMode);
+
+      Serial.print(F("[Mode Switch] Switched Right -> Mode changed from "));
+      Serial.print(oldMode);
+      Serial.print(F(" to new Mode: "));
+      if (currentMode == MODE_PLAY) Serial.println(F("MODE_PLAY"));
+      else if (currentMode == MODE_RECORD) Serial.println(F("MODE_RECORD"));
+      else if (currentMode == MODE_MEMORY) Serial.println(F("MODE_MEMORY"));
+
       lastModeChange = millis();
     } 
     else if (xVal < 200) { // Joystick Left
+      Mode oldMode = currentMode;
       if (currentMode == MODE_PLAY) currentMode = MODE_MEMORY;
       else if (currentMode == MODE_MEMORY) currentMode = MODE_RECORD;
       else if (currentMode == MODE_RECORD) currentMode = MODE_PLAY;
       
-      Serial.print(F("[Mode] Switched Left -> Current Mode: "));
-      Serial.println(currentMode);
+      // Save new mode to EEPROM
+      EEPROM.update(EEPROM_ADDR_MODE, (byte)currentMode);
+
+      Serial.print(F("[Mode Switch] Switched Left -> Mode changed from "));
+      Serial.print(oldMode);
+      Serial.print(F(" to new Mode: "));
+      if (currentMode == MODE_PLAY) Serial.println(F("MODE_PLAY"));
+      else if (currentMode == MODE_RECORD) Serial.println(F("MODE_RECORD"));
+      else if (currentMode == MODE_MEMORY) Serial.println(F("MODE_MEMORY"));
+
       lastModeChange = millis();
     }
   }
@@ -456,9 +522,11 @@ void loop() {
     static unsigned long lastOctaveChange = 0;
     if (millis() - lastOctaveChange > 400) {
       if (yVal > 800) {
+        Serial.println(F("[Joystick Y] Pushed Up -> Increasing Octave"));
         piano.changeOctave(1);
         lastOctaveChange = millis();
       } else if (yVal < 200) {
+        Serial.println(F("[Joystick Y] Pushed Down -> Decreasing Octave"));
         piano.changeOctave(-1);
         lastOctaveChange = millis();
       }
@@ -480,6 +548,7 @@ void loop() {
   else if (currentMode == MODE_RECORD) {
     static bool lastSwState = HIGH;
     if (swPressed && lastSwState == HIGH) {
+      Serial.println(F("[Joystick Switch] Button pressed in RECORD mode."));
       if (!piano.getIsRecording()) {
         piano.startRecording();
       } else {
@@ -509,28 +578,80 @@ void loop() {
   } 
   else if (currentMode == MODE_MEMORY) {
     int totalSongs = sdMgr.getMelodyCount();
-    static int selectedSongIndex = 0;
+    static int selectedSongIndex = -1;
+    static int lastLoadedIndex = -1;
+    static char cachedFilename[13] = "";
+    static bool initMemory = true;
 
+    // Load/Validate song index from EEPROM on entry or file count change
+    if (initMemory) {
+      int storedSong = EEPROM.read(EEPROM_ADDR_SONG);
+      if (totalSongs > 0) {
+        if (storedSong >= totalSongs) {
+          // Nearest smaller valid index fallback if file is missing/deleted
+          selectedSongIndex = totalSongs - 1;
+          Serial.print(F("[EEPROM] Saved song index out of range. Falling back to nearest smaller index: "));
+          Serial.println(selectedSongIndex);
+        } else {
+          selectedSongIndex = storedSong;
+          Serial.print(F("[EEPROM] Loaded saved song index: "));
+          Serial.println(selectedSongIndex);
+        }
+      } else {
+        selectedSongIndex = 0;
+      }
+      initMemory = false;
+    }
+
+    if (totalSongs > 0 && selectedSongIndex >= totalSongs) {
+      selectedSongIndex = totalSongs - 1;
+      Serial.print(F("[Memory] Song index adjusted to nearest smaller valid index: "));
+      Serial.println(selectedSongIndex);
+    }
+
+    bool indexChanged = false;
     if (yVal > 800 && totalSongs > 0) {
       selectedSongIndex = (selectedSongIndex + 1) % totalSongs;
+      indexChanged = true;
+      Serial.print(F("[Joystick Y] Pushed Up in MEMORY mode -> Selected song index: "));
+      Serial.println(selectedSongIndex);
       delay(300);
     } else if (yVal < 200 && totalSongs > 0) {
       selectedSongIndex = (selectedSongIndex - 1 + totalSongs) % totalSongs;
+      indexChanged = true;
+      Serial.print(F("[Joystick Y] Pushed Down in MEMORY mode -> Selected song index: "));
+      Serial.println(selectedSongIndex);
       delay(300);
     }
 
-    char filename[13];
-    if (totalSongs > 0) {
-      sdMgr.getMelodyFilename(selectedSongIndex, filename, sizeof(filename));
-    } else {
-      strcpy(filename, "No Files");
+    // Update filename and display ONLY once when index changes (prevents infinite printing spam)
+    if (indexChanged || selectedSongIndex != lastLoadedIndex) {
+      if (totalSongs > 0) {
+        sdMgr.getMelodyFilename(selectedSongIndex, cachedFilename, sizeof(cachedFilename));
+        EEPROM.update(EEPROM_ADDR_SONG, selectedSongIndex);
+        Serial.print(F("[EEPROM] Saved song index "));
+        Serial.print(selectedSongIndex);
+        Serial.print(F(" (File: "));
+        Serial.print(cachedFilename);
+        Serial.println(F(") to EEPROM."));
+      } else {
+        strcpy(cachedFilename, "No Files");
+      }
+      displayMgr.showMemoryScreen(cachedFilename, selectedSongIndex, totalSongs);
+      lastLoadedIndex = selectedSongIndex;
+    } else if (totalSongs == 0) {
+      strcpy(cachedFilename, "No Files");
+      displayMgr.showMemoryScreen(cachedFilename, 0, 0);
     }
-    
-    displayMgr.showMemoryScreen(filename, selectedSongIndex, totalSongs);
 
     if (swPressed && totalSongs > 0) {
-      piano.playMelodyFromFile(filename);
+      Serial.print(F("[Joystick Switch] Playing selected melody file: "));
+      Serial.println(cachedFilename);
+      piano.playMelodyFromFile(cachedFilename);
+      displayMgr.showMemoryScreen(cachedFilename, selectedSongIndex, totalSongs);
       delay(300);
     }
+  } else {
+    static bool initMemoryReset = false;
   }
 }
