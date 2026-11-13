@@ -101,6 +101,7 @@ private:
     barrierServo.write(GATE_CLOSED);
     currentState = IDLE; // Mark as closed/idle first
     updateStatusLED();   // Switch LED back to Green or Red based on capacity
+    delay(1500);         // 1.5 seconds cooldown after barrier lowers before next operation
   }
 
 public:
@@ -200,7 +201,7 @@ public:
       case WAITING_FOR_CAR_TO_ENTER:
         // Close gate once car clears the exit/inner sensor
         if (exitDist < detectionDistance) {
-          closeGate();        // Closes gate & switches LED to Green/Red
+          closeGate();        // Closes gate, applies 1.5s cooldown & switches LED to Green/Red
           updateDisplay(); 
           delay(500); 
         }
@@ -209,7 +210,7 @@ public:
       case WAITING_FOR_CAR_TO_EXIT:
         // Close gate once car clears the entry/outer sensor
         if (entryDist < detectionDistance) {
-          closeGate();        // Closes gate & switches LED to Green/Red
+          closeGate();        // Closes gate, applies 1.5s cooldown & switches LED to Green/Red
           updateDisplay(); 
           delay(500); 
         }
@@ -224,7 +225,7 @@ public:
 // Setup and Instantiation
 // ==========================================
 
-ParkingManager parkingSystem(2, 3, 4, 5, 10, 6, 11, 9, 0x27, 5, 12.0);
+ParkingManager parkingSystem(2, 3, 4, 5, 10, 6, 11, 9, 0x27, 3, 12.0);
 
 void setup() {
   parkingSystem.begin();
